@@ -43,11 +43,11 @@ BEGIN
 		SELECT DISTINCT StartDateIdx, EndDateIdx FROM PortfolioAssociation a
 		WHERE a.StartDateIdx <= CONVERT(int, @AS_OF_DATE)
 		AND a.EndDateIdx > CONVERT(int, @AS_OF_DATE)
-		AND a.GroupPortfolioUid = @PORT_ID
+		AND a.InvestDivPortfolioUid = @PORT_ID
 	ELSE
 		INSERT INTO #periods
 		SELECT DISTINCT StartDateIdx, EndDateIdx FROM PortfolioAssociation a
-		WHERE a.AcctPortfolioUid = @PORT_ID
+		WHERE a.InvestDivPortfolioUid = @PORT_ID
 	
 	IF (@A_PORT_TYPE = 0)
 		INSERT INTO #myPortTypes
@@ -62,7 +62,7 @@ BEGIN
 		PRINT '@A_PORT_TYPE='+RTRIM(CONVERT(CHAR, @A_PORT_TYPE))+' must be a valid EntityType or zero for all associated Portfolio'
 		GOTO Branch_EXIT
 	END
-	
+
 	IF (@@ERROR = 0)	-- make sure no errors occured
 	BEGIN
 		INSERT INTO #assocPortfolios
