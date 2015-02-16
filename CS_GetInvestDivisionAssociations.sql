@@ -38,7 +38,7 @@ BEGIN
 		GOTO Branch_EXIT
 	END
 
-	IF (@AS_OF_DATE != NULL)
+	IF (@AS_OF_DATE IS NOT NULL)
 		INSERT INTO #periods
 		SELECT DISTINCT StartDateIdx, EndDateIdx FROM PortfolioAssociation a
 		WHERE a.StartDateIdx <= CONVERT(int, @AS_OF_DATE)
