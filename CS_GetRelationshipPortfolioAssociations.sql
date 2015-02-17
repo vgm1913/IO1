@@ -25,176 +25,202 @@ BEGIN
 	-- SET NOCOUNT ON added to prevent extra result sets from
 	-- interfering with SELECT statements.
 	SET NOCOUNT ON;
-	DECLARE @myDateIdx int
-	
+	DECLARE @myDateIdx int, @myPortType int
+	CREATE TABLE #requestedPortTypes (SelectedPortfolioTypeUid int)
+	CREATE TABLE #assocPortfolios (AssocPortfolioUid bigint)
+	CREATE TABLE #relationshipPortfolios (RelationshipPortfolioUid bigint)
+	CREATE TABLE #AcctMgmtPortfolios (AMPortfolioUid bigint)
+
 	IF (@PORT_ID = 0)	-- user passed nothing
 	BEGIN
 		PRINT 'usage: CS_GetRelationshipPortfolioAssociations @PORT_ID bigint, @AS_OF_DATE date [, @A_PORT_TYPE int] [,	@JSON int ]'
-		RETURN
+		GOTO Branch_EXIT
 	END
 	IF (SELECT a.RelationshipTypeFlag FROM PortfolioType a, Portfolio b WHERE PortfolioUid = @PORT_ID AND a.PortfolioTypeUid = b.PortfolioTypeUid) != 'Y'
 	BEGIN
 		PRINT 'usage: CS_GetRelationshipPortfolioAssociations @PORT_ID bigint, @AS_OF_DATE date [, @A_PORT_TYPE int] [,	@JSON int ]'
 		PRINT '@PORT_ID='+RTRIM(CONVERT(CHAR, @PORT_ID))+' must be a Relationship type Portfolio'
-		RETURN
+		GOTO Branch_EXIT
 	END
-	IF (@AS_OF_DATE IS NULL)
-		SET @myDateIdx = CONVERT(int,GETDATE())
+	SET @myPortType = (SELECT PortfolioTypeUid FROM Portfolio WHERE PortfolioUid = @PORT_ID)
+
+	-- store the portfolio types requested except your own portfolio type (@PORT_ID's portfolio type)
+	IF (@A_PORT_TYPE = 0)
+		INSERT INTO #requestedPortTypes
+		SELECT PortfolioTypeUid FROM PortfolioType WHERE PortfolioTypeUid != @myPortType
 	ELSE
-		SET @myDateIdx = CONVERT(int,@AS_OF_DATE)
+		INSERT INTO #requestedPortTypes
+		SELECT PortfolioTypeUid FROM PortfolioType WHERE PortfolioTypeUid = @A_PORT_TYPE AND PortfolioTypeUid != @myPortType
+
+	IF (SELECT COUNT(*) FROM #requestedPortTypes) = 0
+	BEGIN
+		PRINT 'usage: CS_GetRelationshipPortfolioAssociations @PORT_ID bigint, @AS_OF_DATE date [, @A_PORT_TYPE int] [,	@JSON int ]'
+		PRINT '@A_PORT_TYPE='+RTRIM(CONVERT(CHAR, @A_PORT_TYPE))+' must be a valid Portfolio Type UID other than the portfolio type of @PORT_ID or zero for all associated Portfolios'
+		GOTO Branch_EXIT
+	END
 
 	IF (@@ERROR = 0)	-- make sure no errors occured
 	BEGIN
-		SELECT @PORT_ID
+		IF @myPortType = (SELECT PortfolioTypeUid FROM PortfolioType WHERE PortfolioTypeAbbr = 'ACCT-MGR')
+			INSERT INTO #AcctMgmtPortfolios -- date does not filter out yourself - if portfolio passed is the core relationship type
+			SELECT @PORT_ID
+		ELSE
+		BEGIN
+			IF (@AS_OF_DATE IS NULL)		-- if no specific date selected, pick everything
+				INSERT INTO #AcctMgmtPortfolios
+				SELECT AcctMgrPortfolioUid
+				FROM PortfolioActivity
+				WHERE @PORT_ID = PortfolioUid
+			ELSE
+				INSERT INTO #AcctMgmtPortfolios
+				SELECT AcctMgrPortfolioUid
+				FROM PortfolioActivity
+				WHERE @PORT_ID = PortfolioUid
+				AND StartDateIdx <= CONVERT(int, @AS_OF_DATE)
+				AND EndDateIdx > CONVERT(int, @AS_OF_DATE)
+		END
+
+		IF (@AS_OF_DATE IS NULL)		-- if no specific date selected, pick everything
+		BEGIN
+			INSERT	INTO #assocPortfolios
+			SELECT	DISTINCT b.AcctPortfolioUid PortfolioUid
+			FROM	#AcctMgmtPortfolios a, PortfolioAssociation b
+			WHERE	a.AMPortfolioUid = b.AcctMgmtPortfolioUid
+			UNION
+			SELECT	DISTINCT b.MgmrRespPortfolioUid PortfolioUid
+			FROM	#AcctMgmtPortfolios a,	PortfolioAssociation b
+			WHERE	a.AMPortfolioUid = b.AcctMgmtPortfolioUid
+			UNION
+			SELECT	DISTINCT b.GroupPortfolioUid PortfolioUid
+			FROM	#AcctMgmtPortfolios a,	PortfolioAssociation b
+			WHERE	a.AMPortfolioUid = b.AcctMgmtPortfolioUid
+				AND b.GroupPortfolioUid > 0
+			UNION
+			SELECT	DISTINCT b.SuperGroupPortfolioUid PortfolioUid
+			FROM	#AcctMgmtPortfolios a,	PortfolioAssociation b
+			WHERE	a.AMPortfolioUid = b.AcctMgmtPortfolioUid
+				AND b.SuperGroupPortfolioUid > 0
+			UNION
+			SELECT	DISTINCT b.RPPortfolioUid PortfolioUid
+			FROM	#AcctMgmtPortfolios a,	PortfolioAssociation b
+			WHERE	a.AMPortfolioUid = b.AcctMgmtPortfolioUid
+				AND	b.RPPortfolioUid > 0
+			UNION
+			SELECT	DISTINCT b.PCXPortfolioUid PortfolioUid
+			FROM	#AcctMgmtPortfolios a,	PortfolioAssociation b
+			WHERE	a.AMPortfolioUid = b.AcctMgmtPortfolioUid
+				AND	b.PCXPortfolioUid > 0
+			UNION
+			SELECT	DISTINCT b.InvestDivPortfolioUid PortfolioUid
+			FROM	#AcctMgmtPortfolios a,	PortfolioAssociation b
+			WHERE	a.AMPortfolioUid = b.AcctMgmtPortfolioUid
+				AND	b.InvestDivPortfolioUid > 0
+
+			INSERT	INTO #relationshipPortfolios
+			SELECT	DISTINCT RelationshipPortfolioUid
+			FROM	PortfolioRelationship a, PortfolioActivity b, #AcctMgmtPortfolios c
+			WHERE	a.RelationshipPortfolioUid = b.PortfolioUid
+				AND	c.AMPortfolioUid = b.AcctMgrPortfolioUid
+				AND	a.PortfolioAUid in (SELECT AssocPortfolioUid FROM #assocPortfolios)
+				AND a.PortfolioBUid in (SELECT AssocPortfolioUid FROM #assocPortfolios)
+		END
+		ELSE
+		BEGIN
+			INSERT	INTO #assocPortfolios
+			SELECT	DISTINCT b.AcctPortfolioUid PortfolioUid
+			FROM	#AcctMgmtPortfolios a, PortfolioAssociation b
+			WHERE	a.AMPortfolioUid = b.AcctMgmtPortfolioUid
+				AND StartDateIdx <= CONVERT(int, @AS_OF_DATE)
+				AND EndDateIdx > CONVERT(int, @AS_OF_DATE)
+			UNION
+			SELECT	DISTINCT b.MgmrRespPortfolioUid PortfolioUid
+			FROM	#AcctMgmtPortfolios a,	PortfolioAssociation b
+			WHERE	a.AMPortfolioUid = b.AcctMgmtPortfolioUid
+				AND StartDateIdx <= CONVERT(int, @AS_OF_DATE)
+				AND EndDateIdx > CONVERT(int, @AS_OF_DATE)
+			UNION
+			SELECT	DISTINCT b.GroupPortfolioUid PortfolioUid
+			FROM	#AcctMgmtPortfolios a,	PortfolioAssociation b
+			WHERE	a.AMPortfolioUid = b.AcctMgmtPortfolioUid
+				AND StartDateIdx <= CONVERT(int, @AS_OF_DATE)
+				AND EndDateIdx > CONVERT(int, @AS_OF_DATE)
+				AND b.GroupPortfolioUid > 0
+			UNION
+			SELECT	DISTINCT b.SuperGroupPortfolioUid PortfolioUid
+			FROM	#AcctMgmtPortfolios a,	PortfolioAssociation b
+			WHERE	a.AMPortfolioUid = b.AcctMgmtPortfolioUid
+				AND b.SuperGroupPortfolioUid > 0
+				AND StartDateIdx <= CONVERT(int, @AS_OF_DATE)
+				AND EndDateIdx > CONVERT(int, @AS_OF_DATE)
+			UNION
+			SELECT	DISTINCT b.RPPortfolioUid PortfolioUid
+			FROM	#AcctMgmtPortfolios a,	PortfolioAssociation b
+			WHERE	a.AMPortfolioUid = b.AcctMgmtPortfolioUid
+				AND b.RPPortfolioUid > 0
+				AND StartDateIdx <= CONVERT(int, @AS_OF_DATE)
+				AND EndDateIdx > CONVERT(int, @AS_OF_DATE)
+			UNION
+			SELECT	DISTINCT b.PCXPortfolioUid PortfolioUid
+			FROM	#AcctMgmtPortfolios a,	PortfolioAssociation b
+			WHERE	a.AMPortfolioUid = b.AcctMgmtPortfolioUid
+				AND b.PCXPortfolioUid > 0
+				AND StartDateIdx <= CONVERT(int, @AS_OF_DATE)
+				AND EndDateIdx > CONVERT(int, @AS_OF_DATE)
+			UNION
+			SELECT	DISTINCT b.InvestDivPortfolioUid PortfolioUid
+			FROM	#AcctMgmtPortfolios a,	PortfolioAssociation b
+			WHERE	a.AMPortfolioUid = b.AcctMgmtPortfolioUid
+				AND b.InvestDivPortfolioUid > 0
+				AND StartDateIdx <= CONVERT(int, @AS_OF_DATE)
+				AND EndDateIdx > CONVERT(int, @AS_OF_DATE)
+
+			INSERT	INTO #relationshipPortfolios
+			SELECT	DISTINCT a.PortfolioAUid
+			FROM	PortfolioRelationship a
+			WHERE	a.PortfolioAUid in (SELECT AssocPortfolioUid FROM #assocPortfolios)
+				AND a.PortfolioBUid in (SELECT AssocPortfolioUid FROM #assocPortfolios)
+				AND a.PortfolioAUid in (SELECT b.PortfolioUid FROM PortfolioActivity b, #AcctMgmtPortfolios c
+										WHERE	b.AcctMgrPortfolioUid = c.AMPortfolioUid
+											AND	b.PortfolioUid = a.PortfolioBUid
+											AND b.StartDateIdx <= CONVERT(int, @AS_OF_DATE)
+											AND b.EndDateIdx > CONVERT(int, @AS_OF_DATE))
+				AND a.PortfolioBUid in (SELECT b.PortfolioUid FROM PortfolioActivity b, #AcctMgmtPortfolios c
+										WHERE	b.AcctMgrPortfolioUid = c.AMPortfolioUid
+											AND	b.PortfolioUid = a.PortfolioAUid
+											AND b.StartDateIdx <= CONVERT(int, @AS_OF_DATE)
+											AND b.EndDateIdx > CONVERT(int, @AS_OF_DATE))
+		END
 	END
 
-	DECLARE @ACCT_Type int, @MGMT_Type int, @RP_Type int, @PCX_Type int, @GRP_Type int, @SGRP_Type int, @INVDIV_Type int
-	SELECT @ACCT_Type = (SELECT PortfolioTypeUid FROM PortfolioType WHERE PortfolioTypeAbbr = 'ACCT')
-	SELECT @MGMT_Type = (SELECT PortfolioTypeUid FROM PortfolioType WHERE PortfolioTypeAbbr = 'MGR')
-	SELECT @RP_Type = (SELECT PortfolioTypeUid FROM PortfolioType WHERE PortfolioTypeAbbr = 'RP')
-	SELECT @PCX_Type = (SELECT PortfolioTypeUid FROM PortfolioType WHERE PortfolioTypeAbbr = 'PCX')
-	SELECT @GRP_Type = (SELECT PortfolioTypeUid FROM PortfolioType WHERE PortfolioTypeAbbr = 'GROUP')
-	SELECT @SGRP_Type = (SELECT PortfolioTypeUid FROM PortfolioType WHERE PortfolioTypeAbbr = 'SUPERGROUP')
-	SELECT @INVDIV_Type = (SELECT PortfolioTypeUid FROM PortfolioType WHERE PortfolioTypeAbbr = 'INVESTDIV')
+	INSERT INTO #assocPortfolios
+	SELECT #relationshipPortfolios.RelationshipPortfolioUid FROM #relationshipPortfolios
 
-
-	IF (SELECT PortfolioTypeUid FROM Portfolio WHERE PortfolioUid = @PORT_ID) = (SELECT PortfolioTypeUid FROM PortfolioType WHERE PortfolioTypeAbbr = 'ACCT-MGR')
-		GOTO Branch_ACCT_MGR    
-	/*
-	IF (SELECT PortfolioTypeUid FROM PortfolioType WHERE PortfolioTypeAbbr = 'ACCT-RP') = @portfolioTypeUid
-		GOTO Branch_ACCT_RP     
-	IF (SELECT PortfolioTypeUid FROM PortfolioType WHERE PortfolioTypeAbbr = 'ACCT-PCX') = @portfolioTypeUid
-		GOTO Branch_ACCT_PCX    
-
-	IF (SELECT PortfolioTypeUid FROM PortfolioType WHERE PortfolioTypeAbbr = 'GRP-MGR') = @portfolioTypeUid
-		GOTO Branch_GRP_MGR     
-	IF (SELECT PortfolioTypeUid FROM PortfolioType WHERE PortfolioTypeAbbr = 'RP-MGR') = @portfolioTypeUid
-		GOTO Branch_RP_MGR      
-	IF (SELECT PortfolioTypeUid FROM PortfolioType WHERE PortfolioTypeAbbr = 'SGRP-MGR') = @portfolioTypeUid
-		GOTO Branch_SGRP_MGR    
-	IF (SELECT PortfolioTypeUid FROM PortfolioType WHERE PortfolioTypeAbbr = 'PCX-MGR') = @portfolioTypeUid
-		GOTO Branch_PCX_MGR     
-	IF (SELECT PortfolioTypeUid FROM PortfolioType WHERE PortfolioTypeAbbr = 'GROUP-ACCT') = @portfolioTypeUid
-		GOTO Branch_GROUP_ACCT  
-	IF (SELECT PortfolioTypeUid FROM PortfolioType WHERE PortfolioTypeAbbr = 'GROUP-RP') = @portfolioTypeUid
-		GOTO Branch_GROUP_RP    
-	IF (SELECT PortfolioTypeUid FROM PortfolioType WHERE PortfolioTypeAbbr = 'GROUP-PCX') = @portfolioTypeUid
-		GOTO Branch_GROUP_PCX
-	IF (SELECT PortfolioTypeUid FROM PortfolioType WHERE PortfolioTypeAbbr = 'SGRP-RP') = @portfolioTypeUid
-		GOTO Branch_SGRP_RP     
-	IF (SELECT PortfolioTypeUid FROM PortfolioType WHERE PortfolioTypeAbbr = 'SGRP-PCX') = @portfolioTypeUid
-		GOTO Branch_SGRP_PCX    
-	IF (SELECT PortfolioTypeUid FROM PortfolioType WHERE PortfolioTypeAbbr = 'INVDIV-ACCT') = @portfolioTypeUid
-		GOTO Branch_INVDIV_ACCT 
-	IF (SELECT PortfolioTypeUid FROM PortfolioType WHERE PortfolioTypeAbbr = 'INVDIV-MGR') = @portfolioTypeUid
-		GOTO Branch_INVDIV_MGR  
-	IF (SELECT PortfolioTypeUid FROM PortfolioType WHERE PortfolioTypeAbbr = 'INVDIV-RP') = @portfolioTypeUid
-		GOTO Branch_INVDIV_RP   
-	IF (SELECT PortfolioTypeUid FROM PortfolioType WHERE PortfolioTypeAbbr = 'INVDIV-PCX') = @portfolioTypeUid
-		GOTO Branch_INVDIV_PCX  
-	IF (SELECT PortfolioTypeUid FROM PortfolioType WHERE PortfolioTypeAbbr = 'INVDIV-GRP') = @portfolioTypeUid
-		GOTO Branch_INVDIV_GRP  
-	IF (SELECT PortfolioTypeUid FROM PortfolioType WHERE PortfolioTypeAbbr = 'INVDIV-SGRP') = @portfolioTypeUid
-		GOTO Branch_INVDIV_SGRP 
-	*/
-		GOTO Branch_END
-
-    Branch_ACCT_MGR:
-		DECLARE @ACCT_PortfolioUid bigint
-		SET @ACCT_PortfolioUid = (SELECT * FROM PortfolioRelationship a WHERE a.RelationshipPortfolioUid = @PORT_ID
-		AND  
-        exec CS_GetAccountRelationships @PORT_ID, @AS_OF_DATE, @A_PORT_TYPE, @JSON   
-		GOTO Branch_EXIT;
-    /*
-	Branch_GRP_MGR:
-    	PRINT '------------------------------------------'
-		PRINT 'Entering Proc: pop_Portfolio_GRP_MGR Time:'+CONVERT(varchar, GETDATE())
-        exec pop_Portfolio_GRP_MGR @CutOffDate    
-		GOTO Branch_END;
-    Branch_RP_MGR:
-    	PRINT '------------------------------------------'
-		PRINT 'Entering Proc: pop_Portfolio_RP_MGR Time:'+CONVERT(varchar, GETDATE())
-        exec pop_Portfolio_RP_MGR @CutOffDate     
-		GOTO Branch_END;
-    Branch_SGRP_MGR:
-       	PRINT '------------------------------------------'
-		PRINT 'Entering Proc: pop_Portfolio_SGRP_MGR Time:'+CONVERT(varchar, GETDATE())
-		exec pop_Portfolio_SGRP_MGR @CutOffDate   
-		GOTO Branch_END;
-    Branch_PCX_MGR:
-       	PRINT '------------------------------------------'
-		PRINT 'Entering Proc: pop_Portfolio_PCX_MGR Time:'+CONVERT(varchar, GETDATE())
-		exec pop_Portfolio_PCX_MGR @CutOffDate    
-		GOTO Branch_END;
-    Branch_ACCT_RP:
-    	PRINT '------------------------------------------'
-		PRINT 'Entering Proc: pop_Portfolio_ACCT_RP Time:'+CONVERT(varchar, GETDATE())
-        exec pop_Portfolio_ACCT_RP @CutOffDate    
-		GOTO Branch_END;
-    Branch_ACCT_PCX:
-    	PRINT '------------------------------------------'
-		PRINT 'Entering Proc: pop_Portfolio_ACCT_PCX Time:'+CONVERT(varchar, GETDATE())
-        exec pop_Portfolio_ACCT_PCX @CutOffDate   
-		GOTO Branch_END;
-    Branch_GROUP_ACCT:
-    	PRINT '------------------------------------------'
-		PRINT 'Entering Proc: pop_Portfolio_GROUP_ACCT Time:'+CONVERT(varchar, GETDATE())
-        exec pop_Portfolio_GROUP_ACCT @CutOffDate 
-		GOTO Branch_END;
-    Branch_GROUP_RP:
-    	PRINT '------------------------------------------'
-		PRINT 'Entering Proc: pop_Portfolio_GROUP_RP Time:'+CONVERT(varchar, GETDATE())
-        exec pop_Portfolio_GROUP_RP @CutOffDate   
-		GOTO Branch_END;
-    Branch_GROUP_PCX:
-    	PRINT '------------------------------------------'
-		PRINT 'Entering Proc: pop_Portfolio_GROUP_PCX Time:'+CONVERT(varchar, GETDATE())
-        exec pop_Portfolio_GROUP_PCX @CutOffDate  
-		GOTO Branch_END;
-    Branch_SGRP_RP:
-    	PRINT '------------------------------------------'
-		PRINT 'Entering Proc: pop_Portfolio_SGRP_RP Time:'+CONVERT(varchar, GETDATE())
-        exec pop_Portfolio_SGRP_RP @CutOffDate    
-		GOTO Branch_END;
-    Branch_SGRP_PCX:
-    	PRINT '------------------------------------------'
-		PRINT 'Entering Proc: pop_Portfolio_SGRP_PCX Time:'+CONVERT(varchar, GETDATE())
-        exec pop_Portfolio_SGRP_PCX @CutOffDate   
-		GOTO Branch_END;
-    Branch_INVDIV_ACCT:
-    	PRINT '------------------------------------------'
-		PRINT 'Entering Proc: pop_Portfolio_INVDIV_ACCT Time:'+CONVERT(varchar, GETDATE())
-        exec pop_Portfolio_INVDIV_ACCT @CutOffDate
-		GOTO Branch_END;
-    Branch_INVDIV_MGR:
-    	PRINT '------------------------------------------'
-		PRINT 'Entering Proc: pop_Portfolio_INVDIV_MGR Time:'+CONVERT(varchar, GETDATE())
-        exec pop_Portfolio_INVDIV_MGR @CutOffDate 
-		GOTO Branch_END;
-    Branch_INVDIV_RP:
-    	PRINT '------------------------------------------'
-		PRINT 'Entering Proc: pop_Portfolio_INVDIV_RP Time:'+CONVERT(varchar, GETDATE())
-        exec pop_Portfolio_INVDIV_RP @CutOffDate  
-		GOTO Branch_END;
-    Branch_INVDIV_PCX:
-    	PRINT '------------------------------------------'
-		PRINT 'Entering Proc: pop_Portfolio_INVDIV_PCX Time:'+CONVERT(varchar, GETDATE())
-        exec pop_Portfolio_INVDIV_PCX @CutOffDate 
-		GOTO Branch_END;
-    Branch_INVDIV_GRP:
-    	PRINT '------------------------------------------'
-		PRINT 'Entering Proc: pop_Portfolio_INVDIV_GRP Time:'+CONVERT(varchar, GETDATE())
-        exec pop_Portfolio_INVDIV_GRP @CutOffDate 
-		GOTO Branch_END;
-    Branch_INVDIV_SGRP:
-    	PRINT '------------------------------------------'
-		PRINT 'Entering Proc: pop_Portfolio_INVDIV_SGRP Time:'+CONVERT(varchar, GETDATE())
-        exec pop_Portfolio_INVDIV_SGRP @CutOffDate
-		GOTO Branch_END;
-
-	*/
+	IF (@JSON = 0)
+		SELECT	DISTINCT
+					PortfolioUid
+			,		RTRIM(PortfolioName) PortfolioName
+			,		PortfolioTypeUid
+			,		PortfolioCurrencyUid
+			,		StartDate
+			,		EndDate
+			FROM	Portfolio a, #assocPortfolios b, #requestedPortTypes c
+			WHERE	a.PortfolioUid = b.AssocPortfolioUid
+			AND		a.PortfolioTypeUid = c.SelectedPortfolioTypeUid
+			ORDER BY PortfolioTypeUid, PortfolioName, StartDate
+	ELSE
+		BEGIN
+			DECLARE @mySQL varchar(MAX)
+			SET @mySQL = 'SELECT DISTINCT PortfolioUid, RTRIM(PortfolioName) PortfolioName, PortfolioTypeUid, PortfolioCurrencyUid, StartDate,	EndDate '+
+						 'FROM	 Portfolio  a, #assocPortfolios b'+
+						' WHERE	 a.PortfolioUid = b.AssocPortfolioUid'+
+						'	AND	 a.PortfolioTypeUid = c.SelectedPortfolioTypeUid'+
+						' ORDER BY PortfolioTypeUid, PortfolioName, StartDate'
+			EXEC [dbo].[ToJSON] @mySQL
+		END	
 
 	Branch_EXIT:
-
+		DROP TABLE #requestedPortTypes
+		DROP TABLE #assocPortfolios
+		DROP TABLE #relationshipPortfolios
 END
 GO
